@@ -189,7 +189,11 @@ end:
     return ret;
 }
 
-
+typedef struct AVFrameList
+{
+    AVFrame *frame;
+    struct AVFrameList *next;
+}AVFrameList;
 
 
 
@@ -205,6 +209,9 @@ typedef struct OutputStream {
 
     AVFrame *frame;
     AVFrame *tmp_frame;
+
+    //for test
+    AVFrameList *frame_list;
 
     float t, tincr, tincr2;
 
@@ -743,10 +750,11 @@ int main(int argc, char **argv)
     av_register_all();
     avformat_network_init();
 
-//    if ((ret = open_input_file(argv[2])) < 0)
-//        goto end;
-//    if ((ret = init_filters(filter_descr)) < 0)
-//        goto end;
+    //open input file and init filter
+    if ((ret = open_input_file(argv[2])) < 0)
+        goto end;
+    if ((ret = init_filters(filter_descr)) < 0)
+        goto end;
 
     if (argc < 2) {
         printf("usage: %s output_file\n"
@@ -758,8 +766,6 @@ int main(int argc, char **argv)
                "\n", argv[0]);
         return 1;
     }
-    //argv1 output filename
-    //argv2 input filename
 
     filename = argv[1];
 //    for (i = 2; i+1 < argc; i+=2) {
@@ -781,11 +787,13 @@ int main(int argc, char **argv)
     /* Add the audio and video streams using the default format codecs
      * and initialize the codecs. */
     if (fmt->video_codec != AV_CODEC_ID_NONE) {
+        fmt->video_codec = AV_CODEC_ID_H264;
         add_stream(&video_st, oc, &video_codec, fmt->video_codec);
         have_video = 1;
         encode_video = 1;
     }
     if (fmt->audio_codec != AV_CODEC_ID_NONE) {
+        fmt->audio_codec = AV_CODEC_ID_AAC;
         add_stream(&audio_st, oc, &audio_codec, fmt->audio_codec);
         have_audio = 1;
         encode_audio = 1;
@@ -819,16 +827,32 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    while (encode_video || encode_audio) {
-        /* select the stream to encode */
-        if (encode_video &&
-            (!encode_audio || av_compare_ts(video_st.next_pts, video_st.enc->time_base,
-                                            audio_st.next_pts, audio_st.enc->time_base) <= 0)) {
-            encode_video = !write_video_frame(oc, &video_st);
-        } else {
-            encode_audio = !write_audio_frame(oc, &audio_st);
+//    while (encode_video || encode_audio) {
+//        /* select the stream to encode */
+//        if (encode_video &&
+//            (!encode_audio || av_compare_ts(video_st.next_pts, video_st.enc->time_base,
+//                                            audio_st.next_pts, audio_st.enc->time_base) <= 0)) {
+//            encode_video = !write_video_frame(oc, &video_st);
+//        } else {
+//            encode_audio = !write_audio_frame(oc, &audio_st);
+//        }
+//    }
+
+    //decode get a frame, send to filter, get a frame from filter and encode, write out
+    av_init_packet(&packet);
+    int input_valid = 1;
+    for(;;){
+        //read a video frame
+        if(input_valid)
+            ret = av_read_frame(input_fmt_ctx, &packet);
+        if(ret == 0){
+            //got packet
+        } else if(ret < 0) {
+
         }
     }
+
+
 
     /* Write the trailer, if any. The trailer must be written before you
      * close the CodecContexts open when you wrote the header; otherwise
