@@ -210,7 +210,7 @@ typedef struct OutputStream {
 
     AVFrame *frame;
     AVFrame *tmp_frame;
-
+    AVFrame *filter_frame;
     //for test
     AVFrameList *frame_list;
 
@@ -586,17 +586,23 @@ static void open_video(AVFormatContext *oc, AVCodec *codec, OutputStream *ost, A
         exit(1);
     }
 
+    ost->tmp_frame = alloc_picture(c->pix_fmt, c->width, c->height);
+    if (!ost->tmp_frame) {
+        fprintf(stderr, "Could not allocate video frame\n");
+        exit(1);
+    }
+    ost->filter_frame = av_frame_alloc();
     /* If the output format is not YUV420P, then a temporary YUV420P
      * picture is needed too. It is then converted to the required
      * output format. */
-    ost->tmp_frame = NULL;
-    if (c->pix_fmt != AV_PIX_FMT_YUV420P) {
-        ost->tmp_frame = alloc_picture(AV_PIX_FMT_YUV420P, c->width, c->height);
-        if (!ost->tmp_frame) {
-            fprintf(stderr, "Could not allocate temporary picture\n");
-            exit(1);
-        }
-    }
+//    ost->tmp_frame = NULL;
+//    if (c->pix_fmt != AV_PIX_FMT_YUV420P) {
+//        ost->tmp_frame = alloc_picture(AV_PIX_FMT_YUV420P, c->width, c->height);
+//        if (!ost->tmp_frame) {
+//            fprintf(stderr, "Could not allocate temporary picture\n");
+//            exit(1);
+//        }
+//    }
 
     /* copy the stream parameters to the muxer */
     ret = avcodec_parameters_from_context(ost->st->codecpar, c);
@@ -677,8 +683,9 @@ int pendding = 0;//0 read a new packet
 static int get_picture_from_decoder(AVFrame* frame){
     int ret;
     if(!pendding){
+        av_init_packet(&g_packet);
         ret = av_read_frame(input_fmt_ctx, &g_packet);
-        if(ret < 0){
+        if(ret < 0 || g_packet.stream_index != video_stream_index){
             //error or end of file
             return ret;
         }
@@ -725,24 +732,25 @@ static AVFrame *get_one_video_frame(OutputStream *ost)
      * internally; make sure we do not overwrite it here */
     if (av_frame_make_writable(ost->frame) < 0)
         exit(1);
-    if(ost->tmp_frame == NULL)
-        ost->tmp_frame = alloc_picture(AV_PIX_FMT_YUV420P, c->width, c->height);
     if (av_frame_make_writable(ost->tmp_frame) < 0)
         exit(1);
-    input_valid = get_one_picture_from_filter(ost->tmp_frame);
-    int pic_format = ost->tmp_frame->format;
+    if(input_valid)
+        input_valid = get_one_picture_from_filter(ost->filter_frame);
+    int pic_format = ost->filter_frame->format;
+    output_frame = ost->filter_frame;
     if(!input_valid){
         //restart
         //input_valid = get_one_picture_from_filter(ost->frame);
         fill_yuv_image(ost->tmp_frame, ost->next_pts, c->width, c->height);
         pic_format = AV_PIX_FMT_YUV420P;
+        output_frame = ost->tmp_frame;
     }
 
     if (c->pix_fmt != pic_format) {
         /* as we only generate a YUV420P picture, we must convert it
          * to the codec pixel format if needed */
         if (!ost->sws_ctx) {
-            ost->sws_ctx = sws_getContext(c->width, c->height,
+            ost->sws_ctx = sws_getContext(output_frame->width, output_frame->height,
                                           pic_format,
                                           c->width, c->height,
                                           c->pix_fmt,
@@ -755,10 +763,11 @@ static AVFrame *get_one_video_frame(OutputStream *ost)
         }
     //    fill_yuv_image(ost->tmp_frame, ost->next_pts, c->width, c->height);
         sws_scale(ost->sws_ctx,
-                  (const uint8_t * const *)ost->tmp_frame->data, ost->tmp_frame->linesize,
+                  (const uint8_t * const *)output_frame->data, output_frame->linesize,
                   0, c->height, ost->frame->data, ost->frame->linesize);
     } else {
       //  fill_yuv_image(ost->frame, ost->next_pts, c->width, c->height);
+        ost->frame = output_frame;
     }
 
     ost->frame->pts = ost->next_pts++;
@@ -781,6 +790,7 @@ static int write_video_frame(AVFormatContext *oc, OutputStream *ost)
     c = ost->enc;
 
     frame = get_one_video_frame(ost);
+    //frame = get_video_frame(ost);
 
     av_init_packet(&pkt);
 
