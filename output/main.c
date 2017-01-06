@@ -19,7 +19,8 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-
+//args rtmp://pub.mudu.tv/watch/hm1s6n rtmp://live.mudu.tv/watch/fp6r8x
+//
 /**
  * @file
  * libavformat API example.
@@ -669,6 +670,102 @@ static AVFrame *get_video_frame(OutputStream *ost)
     return ost->frame;
 }
 
+//drive demux and decode, get a frame from the buffersink of filtergraph
+//return value,  0 in case of continue, >0 got frame, <0 eof
+AVPacket g_packet; //packet should be in a context pass to the get_video_frame_from_filter
+int pendding = 0;//0 read a new packet
+static int get_picture_from_decoder(AVFrame* frame){
+    int ret;
+    if(!pendding){
+        ret = av_read_frame(input_fmt_ctx, &g_packet);
+        if(ret < 0){
+            //error or end of file
+            return ret;
+        }
+    }
+    int got_frame = 0;
+    ret = avcodec_decode_video2(dec_ctx, frame, &got_frame, &g_packet);
+    if(ret < 0)
+        return ret;
+    g_packet.data += ret;
+    g_packet.size -= ret;
+    if(g_packet.size <= 0)
+        pendding = 0;
+    else
+        pendding = 1;
+    if(got_frame){
+        return 1;
+    }else{
+        return 0;
+    }
+}
+int get_one_picture_from_filter(AVFrame* frame)
+{
+    int got_picture = 0;
+    while(got_picture == 0){
+        got_picture = get_picture_from_decoder(frame);
+    }
+    return got_picture < 0 ? 0:1;
+}
+
+int input_valid = 1;
+
+static AVFrame *get_one_video_frame(OutputStream *ost)
+{
+    AVCodecContext *c = ost->enc;
+    int got_frame = 0;
+    AVFrame* dummy_frame;
+    AVFrame* output_frame;
+    /* check if we want to generate more frames */
+    if (av_compare_ts(ost->next_pts, c->time_base,
+                      STREAM_DURATION, (AVRational){ 1, 1 }) >= 0)
+        return NULL;
+
+    /* when we pass a frame to the encoder, it may keep a reference to it
+     * internally; make sure we do not overwrite it here */
+    if (av_frame_make_writable(ost->frame) < 0)
+        exit(1);
+    if(ost->tmp_frame == NULL)
+        ost->tmp_frame = alloc_picture(AV_PIX_FMT_YUV420P, c->width, c->height);
+    if (av_frame_make_writable(ost->tmp_frame) < 0)
+        exit(1);
+    input_valid = get_one_picture_from_filter(ost->tmp_frame);
+    int pic_format = ost->tmp_frame->format;
+    if(!input_valid){
+        //restart
+        //input_valid = get_one_picture_from_filter(ost->frame);
+        fill_yuv_image(ost->tmp_frame, ost->next_pts, c->width, c->height);
+        pic_format = AV_PIX_FMT_YUV420P;
+    }
+
+    if (c->pix_fmt != pic_format) {
+        /* as we only generate a YUV420P picture, we must convert it
+         * to the codec pixel format if needed */
+        if (!ost->sws_ctx) {
+            ost->sws_ctx = sws_getContext(c->width, c->height,
+                                          pic_format,
+                                          c->width, c->height,
+                                          c->pix_fmt,
+                                          SCALE_FLAGS, NULL, NULL, NULL);
+            if (!ost->sws_ctx) {
+                fprintf(stderr,
+                        "Could not initialize the conversion context\n");
+                exit(1);
+            }
+        }
+    //    fill_yuv_image(ost->tmp_frame, ost->next_pts, c->width, c->height);
+        sws_scale(ost->sws_ctx,
+                  (const uint8_t * const *)ost->tmp_frame->data, ost->tmp_frame->linesize,
+                  0, c->height, ost->frame->data, ost->frame->linesize);
+    } else {
+      //  fill_yuv_image(ost->frame, ost->next_pts, c->width, c->height);
+    }
+
+    ost->frame->pts = ost->next_pts++;
+
+    return ost->frame;
+}
+
 /*
  * encode one video frame and send it to the muxer
  * return 1 when encoding is finished, 0 otherwise
@@ -683,7 +780,7 @@ static int write_video_frame(AVFormatContext *oc, OutputStream *ost)
 
     c = ost->enc;
 
-    frame = get_video_frame(ost);
+    frame = get_one_video_frame(ost);
 
     av_init_packet(&pkt);
 
@@ -716,6 +813,7 @@ static void close_stream(AVFormatContext *oc, OutputStream *ost)
     sws_freeContext(ost->sws_ctx);
     swr_free(&ost->swr_ctx);
 }
+
 
 /**************************************************************/
 /* media file output */
@@ -827,28 +925,14 @@ int main(int argc, char **argv)
         return 1;
     }
 
-//    while (encode_video || encode_audio) {
-//        /* select the stream to encode */
-//        if (encode_video &&
-//            (!encode_audio || av_compare_ts(video_st.next_pts, video_st.enc->time_base,
-//                                            audio_st.next_pts, audio_st.enc->time_base) <= 0)) {
-//            encode_video = !write_video_frame(oc, &video_st);
-//        } else {
-//            encode_audio = !write_audio_frame(oc, &audio_st);
-//        }
-//    }
-
-    //decode get a frame, send to filter, get a frame from filter and encode, write out
-    av_init_packet(&packet);
-    int input_valid = 1;
-    for(;;){
-        //read a video frame
-        if(input_valid)
-            ret = av_read_frame(input_fmt_ctx, &packet);
-        if(ret == 0){
-            //got packet
-        } else if(ret < 0) {
-
+    while (encode_video || encode_audio) {
+        /* select the stream to encode */
+        if (encode_video &&
+            (!encode_audio || av_compare_ts(video_st.next_pts, video_st.enc->time_base,
+                                            audio_st.next_pts, audio_st.enc->time_base) <= 0)) {
+            encode_video = !write_video_frame(oc, &video_st);
+        } else {
+            encode_audio = !write_audio_frame(oc, &audio_st);
         }
     }
 
